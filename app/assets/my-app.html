@@ -3,70 +3,194 @@
   @description Boilerplate for the music app (from MOTW 2015 workshop)
   @version 0.0.1
 -->
-
+<script src="../bower_components/spiral/spiral.min.js"></script>
+<!-- <script src="../node_modules/requirejs/require.js"></script>
+<script src="../node_modules/detect-pitch/pitch.js"></script> -->
 <link rel="import" href="../bower_components/polymer/polymer.html">
-<link rel="import" href="../bower_components/paper-styles/paper-styles.html">
 <link rel="import" href="../bower_components/spiral-knob/spiral-knob.html">
 
-<script src="../bower_components/spiral/spiral.min.js"></script>
 
 <dom-module id="my-app">
 
   <style>
     /* your style here */
-    :host {
-      display: block;
-      margin: 1em;
-      font-family: 'Roboto', 'Noto', sans-serif;
-      color: #263238;
-      -webkit-font-smoothing: antialiased;
-      -webkit-user-select: none;
-    }
   </style>
 
   <template>
     <!-- your DOM here -->
-    <h1>My First Music App!</h1>
-    <spiral-knob id="knobAmp" label="Amp" value="0.25"></spiral-knob>
+    <h1>HELLO WORLD!</h1>
+    <p>Today is good day.</p>
+    <spiral-knob id="knobAmp"
+                 label="Amp"
+                 value="0.25"></spiral-knob>
+    <spiral-knob id="knobFreq"
+                 label="Freq"
+                 min-value="30"
+                 max-value="1000"
+                 value="50"></spiral-knob>
+    <spiral-knob id="knobFilFreq"
+                 label="FilFreq"
+                 min-value="30"
+                 max-value="1000"
+                 value="200"></spiral-knob>
+    <spiral-knob id="knobFilRes"
+                 label="FilRes"
+                 min-value="0"
+                 max-value="20"
+                 value="0.3"></spiral-knob>
   </template>
 
   <script>
+    function autoCorrelate( buf, sampleRate ) {
+      var SIZE = buf.length;
+      var MAX_SAMPLES = Math.floor(SIZE/2);
+      var best_offset = -1;
+      var best_correlation = 0;
+      var rms = 0;
+      var foundGoodCorrelation = false;
+      var correlations = new Array(MAX_SAMPLES);
+
+      for (var i=0;i<SIZE;i++) {
+        var val = buf[i];
+        rms += val*val;
+      }
+      rms = Math.sqrt(rms/SIZE);
+      if (rms<0.01) // not enough signal
+        return -1;
+
+      var lastCorrelation=1;
+      for (var offset = 0; offset < MAX_SAMPLES; offset++) {
+        var correlation = 0;
+
+        for (var i=0; i<MAX_SAMPLES; i++) {
+          correlation += Math.abs((buf[i])-(buf[i+offset]));
+        }
+        correlation = 1 - (correlation/MAX_SAMPLES);
+        correlations[offset] = correlation; // store it, for the tweaking we need to do below.
+        if ((correlation>0.9) && (correlation > lastCorrelation)) {
+          foundGoodCorrelation = true;
+          if (correlation > best_correlation) {
+            best_correlation = correlation;
+            best_offset = offset;
+          }
+        } else if (foundGoodCorrelation) {
+          var shift = (correlations[best_offset+1] - correlations[best_offset-1])/correlations[best_offset];
+          return sampleRate/(best_offset+(8*shift));
+        }
+        lastCorrelation = correlation;
+      }
+      if (best_correlation > 0.01) {
+        return sampleRate/best_offset;
+      }
+      return -1;
+    }
+
+
     Polymer({
 
       is: "my-app",
 
-      /* user-defined properties */
       properties: {
-        
-        context: {
+        /* user-defined properties */
+        _context: {
           type: Object,
           value: new AudioContext()
-        }
-        
+        },
+        _osc: Object,
+        _amp: Object,
+        _scrptNode: Object,
+        _buf: Object,
+        _detPitch: Object,
+        _bufSize: 1024,
+        MIN_SAMPLES: 0,
+        autoCorrelate: Object
       },
+
 
       /* user-defined methods */
-      _buildAudioGraph: function () {
-        this.context.createNodes(this, {
-          'osc': 'Oscillator',
-          'amp': 'Gain'
-        });
+      buildGraph: function() {
+        this._buf = new Float32Array(this._bufSize)
+        var c = this._context;
+        this._osc1 = c.createOscillator();
+        this._osc2 = c.createOscillator();
+        this._lfo = c.createOscillator();
+        this._depth = c.createGain();
+        this._amp = c.createGain();
+        this._lpf = c.createBiquadFilter();
+        this._rbv = c.createConvolver();
+        this._ana = c.createAnalyser();
 
-        this.osc.to(this.amp).to(this.context.DAC);
-        this.amp.value = 0.25;
-        this.osc.frequency.value = 220;
-        this.osc.start();
+        // this._detPitch = require('detect-pitch')
+        // console.log(this._detPitch)
+
+
+        // initialize script processor
+        this._scrptNode = c.createScriptProcessor(this._bufSize,1,1);
+        console.log(this._scrptNode.bufferSize)
+
+        this._depth.gain.value = 300;
+        this._lfo.frequency.value = 5;
+
+        this._osc1.type="sawtooth";
+        this._osc2.type="triangle";
+        this._lfo.to(this._depth).to(this._lpf.frequency);
+        this._osc1.to(this._lpf);
+        this._osc2.to(this._lpf);
+        this._lpf.to(this._amp).to(c.DAC);
+
+        // this._lfo.start();
+        // this._osc1.start();
+        this._scrptNode.onaudioprocess = function(audioProcessingEvent) {
+          var inputBuffer = audioProcessingEvent.inputBuffer;
+          var outputBuffer = audioProcessingEvent.outputBuffer;
+
+          // Loop through the output channels (in this case there is only one)
+          for (var channel = 0; channel < outputBuffer.numberOfChannels; channel++) {
+            var inputData = inputBuffer.getChannelData(channel);
+            var outputData = outputBuffer.getChannelData(channel);
+
+            // Loop through the 4096 samples
+            for (var sample = 0; sample < inputBuffer.length; sample++) {
+              // make output equal to the same as the input
+              outputData[sample] = inputData[sample];
+              // this._buf[sample] = inputData[sample];
+              // add noise to each output sample
+              // outputData[sample] += ((Math.random() * 2) - 1) * 0.2;
+            }
+
+            var ac = autoCorrelate(outputData,c.sampleRate);
+            console.log(ac)
+          }
+        }
       },
 
-      _bindUI: function () {
-        this.$.knobAmp.bind(this.amp.gain);
+      gotStream: function(stream) {
+        var c = this._context;
+        var input = c.createMediaStreamSource(stream);
+        input.to(this._scrptNode).to(c.DAC);
+        // input.to(this._ana)
+      },
+
+      gotStreamError: function(e) {
+        console.error(e);
       },
 
       /* Polymer built-in event handlers */
       ready: function () {
-        console.log('My app is ready!');
-        this._buildAudioGraph();
-        this._bindUI();
+        if (navigator.webkitGetUserMedia) {
+          console.log("GET MIC INPUT!!");
+          navigator.webkitGetUserMedia({audio:true},
+                                        this.gotStream.bind(this),
+                                        this.gotStreamError.bind(this));
+        } else {
+          console.log("NO MIC INPUT!!!!");
+        };
+        this.buildGraph();
+        this.$.knobAmp.bind(this._amp.gain);
+        this.$.knobFreq.bind(this._osc1.frequency);
+        // this.$.knobFreq.bind(this._osc2.frequency);
+        // this.$.knobFilFreq.bind(this._lpf.frequency);
+        this.$.knobFilRes.bind(this._lpf.Q)
       },
 
       attached: function () {}
